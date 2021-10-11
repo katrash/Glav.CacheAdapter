@@ -1,32 +1,36 @@
-﻿using Glav.CacheAdapter.Core;
-using Glav.CacheAdapter.Core.Diagnostics;
-using Glav.CacheAdapter.Web;
-using StackExchange.Redis;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+
+using Glav.CacheAdapter.Core;
 using Glav.CacheAdapter.Helpers;
+using Glav.CacheAdapter.Web;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using StackExchange.Redis;
 
 namespace Glav.CacheAdapter.Distributed.Redis
 {
-    public class RedisCacheAdapter : ICache
+    internal class RedisCacheAdapter : ICache
     {
-        private readonly ILogging _logger;
-        private readonly RedisCacheFactory _factory;
+        private readonly ILogger<RedisCacheAdapter> _logger;
         private readonly PerRequestCacheHelper _requestCacheHelper = new PerRequestCacheHelper();
         private static IDatabase _db;
-        public static ConnectionMultiplexer _connection;
-        private readonly CacheConfig _config;
+        private static IConnectionMultiplexer _connection;
+        //private readonly IDistributedCache _distributedCache;
         private readonly bool _cacheDependencyManagementEnabled;
 
-        public RedisCacheAdapter(ILogging logger, ConnectionMultiplexer redisConnection, bool cacheDependencyManagementEnabled = false)
+        public RedisCacheAdapter(ILogger<RedisCacheAdapter> logger,
+            IConfiguration configuration, IOptions<CacheConfig> cacheConfig)
         {
             _logger = logger;
-            _connection = redisConnection;
+            string connectionString = configuration["RedisCacheOptions:ConnectionString"];
+            _connection = ConnectionMultiplexer.Connect(connectionString);
             _db = _connection.GetDatabase();
-            _cacheDependencyManagementEnabled = cacheDependencyManagementEnabled;
-
+            _cacheDependencyManagementEnabled = cacheConfig.Value.IsCacheDependencyManagementEnabled;
         }
+
         public T Get<T>(string cacheKey) where T : class
         {
             try
@@ -59,7 +63,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
             }
             catch (Exception ex)
             {
-                _logger.WriteException(ex);
+                _logger.LogError(ex, "Error in get from cache");
             }
             return null;
         }
@@ -68,16 +72,17 @@ namespace Glav.CacheAdapter.Distributed.Redis
         {
             try
             {
+                var binaryData = dataToAdd.Serialize();
                 var expiry = absoluteExpiry - DateTime.Now;
-                var success = _db.StringSet(cacheKey, dataToAdd.Serialize(), expiry);
+                var success = _db.StringSet(cacheKey, binaryData, expiry);
                 if (!success)
                 {
-                    _logger.WriteErrorMessage(string.Format("Unable to store item in cache. CacheKey:{0}", cacheKey));
+                    _logger.LogError("Unable to store item in cache. CacheKey:{cacheKey}", cacheKey);
                 }
             }
             catch (Exception ex)
             {
-                _logger.WriteException(ex);
+                _logger.LogError(ex, "Error adding item");
             }
         }
 
@@ -85,15 +90,16 @@ namespace Glav.CacheAdapter.Distributed.Redis
         {
             try
             {
-                var success = _db.StringSet(cacheKey, dataToAdd.Serialize(), slidingExpiryWindow);
+                var binaryData = dataToAdd.Serialize();
+                var success = _db.StringSet(cacheKey, binaryData, slidingExpiryWindow);
                 if (!success)
                 {
-                    _logger.WriteErrorMessage(string.Format("Unable to store item in cache. CacheKey:{0}", cacheKey));
+                    _logger.LogError("Unable to store item in cache. CacheKey:{cacheKey}", cacheKey);
                 }
             }
             catch (Exception ex)
             {
-                _logger.WriteException(ex);
+                _logger.LogError(ex, "Error add item");
             }
         }
 
@@ -104,12 +110,12 @@ namespace Glav.CacheAdapter.Distributed.Redis
                 var success = _db.KeyDelete(cacheKey);
                 if (!success)
                 {
-                    _logger.WriteErrorMessage(string.Format("Unable to remove item from cache. CacheKey:{0}", cacheKey));
+                    _logger.LogError("Unable to remove item from cache. CacheKey:{cacheKey}", cacheKey);
                 }
             }
             catch (Exception ex)
             {
-                _logger.WriteException(ex);
+                _logger.LogError(ex, "Error invalidate item");
             }
         }
 
@@ -119,7 +125,11 @@ namespace Glav.CacheAdapter.Distributed.Redis
             {
                 return;
             }
-            _logger.WriteInfoMessage("Invalidating a series of cache keys");
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Invalidating a series of cache keys");
+            }
+
             var distinctKeys = cacheKeys.Distinct();
 
             try
@@ -130,65 +140,52 @@ namespace Glav.CacheAdapter.Distributed.Redis
             }
             catch (Exception ex)
             {
-                _logger.WriteException(ex);
+                _logger.LogError(ex, "Error invalidate item");
             }
-
-
         }
-
 
         public void AddToPerRequestCache(string cacheKey, object dataToAdd)
         {
             _requestCacheHelper.AddToPerRequestCache(cacheKey, dataToAdd);
         }
 
-        public CacheSetting CacheType
-        {
-            get { return CacheSetting.Redis; }
-        }
+        public CacheSetting CacheType => CacheSetting.Redis;
 
         public void ClearAll()
         {
-            _logger.WriteInfoMessage("Clearing the cache");
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Clearing the cache");
+            }
+
             var allEndpoints = _connection.GetEndPoints();
             if (allEndpoints != null && allEndpoints.Length > 0)
             {
                 foreach (var endpoint in allEndpoints)
                 {
-                    bool flushWorked;
                     var server = _connection.GetServer(endpoint);
                     try
                     {
                         server.FlushAllDatabases();
-                        flushWorked = true;
                     }
                     catch (Exception ex)
                     {
-                        _logger.WriteErrorMessage("Error flushing the cache (using FlushAllDatabases method):" + ex.Message);
-                        flushWorked = false;
-                    }
-
-                    if (!flushWorked)
-                    {
-                        _logger.WriteErrorMessage("Flushing the database did not work (probably due to requiring admin privileges), attempting to delete all keys");
-
+                        _logger.LogError(ex, "Error flushing the cache using `FlushAllDatabases` method (probably due to requiring admin privileges)");
+                        _logger.LogError("Flushing the cache - attempting to delete all keys");
                         try
                         {
                             var allKeys = server.Keys();
                             _db.KeyDelete(allKeys.ToArray(), CommandFlags.FireAndForget);
                         }
-                        catch (Exception ex)
+                        catch (Exception ex2)
                         {
-                            _logger.WriteErrorMessage("Error flushing the cache (using delete keys method):" + ex.Message);
+                            _logger.LogError(ex2, "Error flushing the cache using `KeyDelete` method");
                         }
                     }
                 }
             }
         }
 
-        public IDatabase RedisDatabase
-        {
-            get { return _db; }
-        }
+        public IDatabase RedisDatabase => _db;
     }
 }

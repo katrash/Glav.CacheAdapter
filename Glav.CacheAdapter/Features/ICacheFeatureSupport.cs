@@ -1,6 +1,4 @@
-﻿using Glav.CacheAdapter.Core;
-
-namespace Glav.CacheAdapter.Features
+﻿namespace Glav.CacheAdapter.Features
 {
     public interface ICacheFeatureSupport
     {

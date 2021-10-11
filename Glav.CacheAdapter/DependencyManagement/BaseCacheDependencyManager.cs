@@ -1,28 +1,28 @@
-﻿using Glav.CacheAdapter.Core;
-using Glav.CacheAdapter.Core.Diagnostics;
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 
+using Glav.CacheAdapter.Core;
+
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+
 namespace Glav.CacheAdapter.DependencyManagement
 {
-    public abstract class BaseCacheDependencyManager : ICacheDependencyManager
+    internal abstract class BaseCacheDependencyManager : ICacheDependencyManager
     {
-        private readonly ICache _cache;
-        private readonly ILogging _logger;
-        private readonly CacheConfig _config;
-
-        protected BaseCacheDependencyManager(ICache cache, ILogging logger, CacheConfig config = null)
+        protected BaseCacheDependencyManager(ICache cache, ILogger logger, IOptions<CacheConfig> config)
         {
-            _cache = cache;
-            _logger = logger;
-            _config = config ?? new CacheConfig();
-
+            Cache = cache;
+            Logger = logger;
+            Config = config.Value;
         }
 
-        public CacheConfig Config { get { return _config; } }
-        public ICache Cache { get { return _cache; } }
-        public ILogging Logger { get { return _logger; } }
+        public CacheConfig Config { get; }
+
+        public ICache Cache { get; }
+
+        public ILogger Logger { get; }
 
         public abstract void RegisterParentDependencyDefinition(string parentKey, CacheDependencyAction actionToPerform = CacheDependencyAction.ClearDependentItems);
 
@@ -36,18 +36,23 @@ namespace Glav.CacheAdapter.DependencyManagement
 
         public virtual void PerformActionForDependenciesAssociatedWithParent(string parentKey)
         {
-            Logger.WriteInfoMessage(string.Format("Performing required actions on associated dependency cache keys for parent key:[{0}]", parentKey));
+            if (Logger.IsEnabled(LogLevel.Debug))
+            {
+                Logger.LogDebug("Performing required actions on associated dependency cache keys for parent key:[{parentKey}]", parentKey);
+            }
 
             ExecuteDefaultOrSuppliedActionForParentKeyDependencies(parentKey);
         }
 
-
         public virtual void ForceActionForDependenciesAssociatedWithParent(string parentKey, CacheDependencyAction forcedAction)
         {
-            Logger.WriteInfoMessage(string.Format("Forcing action:[{0}] on dependency cache keys for parent key:[{1}]", forcedAction, parentKey));
+            if (Logger.IsEnabled(LogLevel.Debug))
+            {
+                Logger.LogDebug("Forcing action:[{forceAction}] on dependency cache keys for parent key:[{parentKey}]", forcedAction, parentKey);
+            }
+
             ExecuteDefaultOrSuppliedActionForParentKeyDependencies(parentKey, forcedAction);
         }
-
 
         protected virtual void ExecuteDefaultOrSuppliedActionForParentKeyDependencies(string parentKey, CacheDependencyAction? forcedAction = null)
         {
@@ -55,7 +60,10 @@ namespace Glav.CacheAdapter.DependencyManagement
             {
                 return;
             }
-            Logger.WriteInfoMessage(string.Format("executing action on dependency cache keys for parent key:[{0}]", parentKey));
+            if (Logger.IsEnabled(LogLevel.Debug))
+            {
+                Logger.LogDebug("executing action on dependency cache keys for parent key:[{parentKey}]", parentKey);
+            }
 
             var alreadyProcessedKeys = new List<string>();
 
@@ -74,12 +82,12 @@ namespace Glav.CacheAdapter.DependencyManagement
                         itemsToClear.Add(item.CacheKey);
                         break;
                     default:
-                        throw new NotSupportedException(string.Format("Action [{0}] not supported at this time", cacheItemAction));
+                        throw new NotSupportedException($"Action [{cacheItemAction}] not supported at this time");
                 }
             });
             if (itemsToClear.Count > 0)
             {
-                _cache.InvalidateCacheItems(itemsToClear);
+                Cache.InvalidateCacheItems(itemsToClear);
             }
         }
 
@@ -97,12 +105,14 @@ namespace Glav.CacheAdapter.DependencyManagement
                 alreadyProcessedKeys = new List<string>();
             }
 
-
-
             var items = GetDependentCacheKeysForParent(parentKey);
             var dependencyItems = items as DependencyItem[] ?? items.ToArray();
             var numItems = items != null ? dependencyItems.Count() : 0;
-            _logger.WriteInfoMessage(string.Format("Number of dependencies found for master cache key [{0}] is: {1}", parentKey, numItems));
+            if (Logger.IsEnabled(LogLevel.Debug))
+            {
+                Logger.LogDebug("Number of dependencies found for master cache key [{parentKey}] is: {count}", parentKey, numItems);
+            }
+
             if (numItems > 0)
             {
                 foreach (var item in dependencyItems)
@@ -117,7 +127,11 @@ namespace Glav.CacheAdapter.DependencyManagement
                         continue;
                     }
                     cacheKeysToAction.Add(item);
-                    Logger.WriteInfoMessage(string.Format("--> Child cache key [{0}] added for processing of parent key [{1}]", item.CacheKey, parentKey));
+                    if (Logger.IsEnabled(LogLevel.Debug))
+                    {
+                        Logger.LogDebug("--> Child cache key [{cacheKey}] added for processing of parent key [{parentKey}]", item.CacheKey, parentKey);
+                    }
+
                     alreadyProcessedKeys.Add(item.CacheKey);
                     cacheKeysToAction.AddRange(GetCacheKeysToActionForParentKeyDependencies(item.CacheKey, alreadyProcessedKeys));
                 }
@@ -125,15 +139,14 @@ namespace Glav.CacheAdapter.DependencyManagement
             return cacheKeysToAction;
         }
 
-
         public bool IsOkToActOnDependencyKeysForParent(string parentKey)
         {
-            if (!_config.IsCacheEnabled)
+            if (!Config.IsCacheEnabled)
             {
                 return false;
             }
 
-            if (!_config.IsCacheDependencyManagementEnabled)
+            if (!Config.IsCacheDependencyManagementEnabled)
             {
                 return false;
             }

@@ -1,9 +1,9 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Linq;
-using System.Runtime.Caching;
-using Glav.CacheAdapter.Core.Diagnostics;
+using System.Reflection;
 using Glav.CacheAdapter.Web;
+using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Logging;
 
 namespace Glav.CacheAdapter.Core
 {
@@ -11,14 +11,13 @@ namespace Glav.CacheAdapter.Core
     /// In memory cache with no dependencies on the web cache, only runtime dependencies.
     /// ie. Can be used in any type of application, desktop, web, service or otherwise.
     /// </summary>
-    public class MemoryCacheAdapter : ICache
+    internal class MemoryCacheAdapter : ICache
     {
-        private readonly MemoryCache _cache;
-        private readonly ILogging _logger;
+        private readonly IMemoryCache _cache;
+        private readonly ILogger<MemoryCacheAdapter> _logger;
         private readonly PerRequestCacheHelper _requestCacheHelper = new PerRequestCacheHelper();
 
-
-        public MemoryCacheAdapter(ILogging logger, MemoryCache cache)
+        public MemoryCacheAdapter(ILogger<MemoryCacheAdapter> logger, IMemoryCache cache)
         {
             _logger = logger;
             _cache = cache;
@@ -26,16 +25,19 @@ namespace Glav.CacheAdapter.Core
 
         public void Add(string cacheKey, DateTime expiry, object dataToAdd)
         {
-            var policy = new CacheItemPolicy
+            var policy = new MemoryCacheEntryOptions
             {
                 AbsoluteExpiration = new DateTimeOffset(expiry)
             };
 
             if (dataToAdd != null)
             {
-                _cache.Add(cacheKey, dataToAdd, policy);
-                _logger.WriteInfoMessage(string.Format("Adding data to cache with cache key: {0}, expiry date {1}", cacheKey, expiry.ToString("yyyy/MM/dd hh:mm:ss")));
-
+                _cache.Set(cacheKey, dataToAdd, policy);
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug("Adding data to cache with cache key: {cacheKey}, expiry date {expiryDate}",
+                        cacheKey, expiry.ToString("yyyy/MM/dd hh:mm:ss"));
+                }
             }
         }
 
@@ -54,8 +56,10 @@ namespace Glav.CacheAdapter.Core
 
         public void InvalidateCacheItem(string cacheKey)
         {
-            if (_cache.Contains(cacheKey))
+            if (_cache.TryGetValue(cacheKey, out object _))
+            {
                 _cache.Remove(cacheKey);
+            }
         }
 
         public void InvalidateCacheItems(IEnumerable<string> cacheKeys)
@@ -64,7 +68,11 @@ namespace Glav.CacheAdapter.Core
             {
                 return;
             }
-            _logger.WriteInfoMessage("Invalidating a series of cache keys");
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Invalidating a series of cache keys");
+            }
+
             foreach (var cacheKey in cacheKeys)
             {
                 _cache.Remove(cacheKey);
@@ -75,11 +83,13 @@ namespace Glav.CacheAdapter.Core
         {
             if (dataToAdd != null)
             {
-                var item = new CacheItem(cacheKey, dataToAdd);
-                var policy = new CacheItemPolicy() { SlidingExpiration = slidingExpiryWindow };
-                _cache.Add(item, policy);
-                _logger.WriteInfoMessage(string.Format("Adding data to cache with cache key: {0}, sliding expiry window in seconds {1}", cacheKey, slidingExpiryWindow.TotalSeconds));
-
+                var policy = new MemoryCacheEntryOptions() { SlidingExpiration = slidingExpiryWindow };
+                _cache.Set(cacheKey, dataToAdd, policy);
+                if (_logger.IsEnabled(LogLevel.Debug))
+                {
+                    _logger.LogDebug("Adding data to cache with cache key: {cacheKey}, sliding expiry window: {slidingExpiry} seconds",
+                        cacheKey, slidingExpiryWindow.TotalSeconds);
+                }
             }
         }
 
@@ -88,20 +98,50 @@ namespace Glav.CacheAdapter.Core
             _requestCacheHelper.AddToPerRequestCache(cacheKey, dataToAdd);
         }
 
-
-        public CacheSetting CacheType
-        {
-            get { return CacheSetting.Memory; }
-        }
-
+        public CacheSetting CacheType => CacheSetting.Memory;
 
         public void ClearAll()
         {
-            _logger.WriteInfoMessage("Clearing the cache");
-            _cache.ToList().ForEach(i =>
-                                        {
-                                            _cache.Remove(i.Key);
-                                        });
+            if (_logger.IsEnabled(LogLevel.Debug))
+            {
+                _logger.LogDebug("Clearing the cache");
+            }
+
+            // from https://stackoverflow.com/questions/34406737/how-to-remove-all-objects-reset-from-imemorycache-in-asp-net-core
+            if (_cache is MemoryCache memCache)
+            {
+                memCache.Compact(1.0);
+                return;
+            }
+            else
+            {
+                MethodInfo clearMethod = _cache.GetType().GetMethod("Clear", BindingFlags.Instance | BindingFlags.Public);
+                if (clearMethod != null)
+                {
+                    clearMethod.Invoke(_cache, null);
+                    return;
+                }
+                else
+                {
+                    PropertyInfo prop = _cache.GetType().GetProperty("EntriesCollection", BindingFlags.Instance | BindingFlags.GetProperty | BindingFlags.NonPublic | BindingFlags.Public);
+                    if (prop != null)
+                    {
+                        object innerCache = prop.GetValue(_cache);
+                        if (innerCache != null)
+                        {
+                            clearMethod = innerCache.GetType().GetMethod("Clear", BindingFlags.Instance | BindingFlags.Public);
+                            if (clearMethod != null)
+                            {
+                                clearMethod.Invoke(innerCache, null);
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+
+            throw new InvalidOperationException("Unable to clear memory cache instance of type " +
+                _cache.GetType().FullName);
         }
     }
 }
