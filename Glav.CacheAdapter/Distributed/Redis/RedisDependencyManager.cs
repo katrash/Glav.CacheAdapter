@@ -12,13 +12,14 @@ namespace Glav.CacheAdapter.Distributed.Redis
 {
     internal class RedisDependencyManager : BaseCacheDependencyManager
     {
-        private readonly IDatabase _redisDatabase;
+        private readonly RedisCacheAdapter _baseCache;
 
-        public RedisDependencyManager(ICache cache, IDatabase redisDatabase,
+        public RedisDependencyManager(ICache cache,
             ILogger<RedisDependencyManager> logger, IOptions<CacheConfig> config)
             : base(cache, logger, config)
         {
-            _redisDatabase = redisDatabase;
+            _baseCache = cache as RedisCacheAdapter
+                ?? throw new ArgumentException($"{nameof(cache)} is not of type {nameof(RedisCacheAdapter)}");
         }
 
         public override void RegisterParentDependencyDefinition(string parentKey, CacheDependencyAction actionToPerform = CacheDependencyAction.ClearDependentItems)
@@ -31,8 +32,9 @@ namespace Glav.CacheAdapter.Distributed.Redis
             var item = new DependencyItem { CacheKey = parentKey, Action = actionToPerform, IsParentNode = true };
 
             var cacheValueItems = new List<RedisValue>();
+            IDatabase db = _baseCache.RedisDatabase;
 
-            var parentKeyExists = _redisDatabase.KeyExists(parentKey);
+            var parentKeyExists = db.KeyExists(parentKey);
             if (parentKeyExists)
             {
                 if (Logger.IsEnabled(LogLevel.Debug))
@@ -40,12 +42,12 @@ namespace Glav.CacheAdapter.Distributed.Redis
                     Logger.LogDebug("Registering parent item:[{parentKey}] - key already exists", parentKey);
                 }
 
-                var currentValueType = _redisDatabase.KeyType(parentKey);
+                var currentValueType = db.KeyType(parentKey);
                 if (currentValueType == RedisType.String)
                 {
                     // it is NOT currently a List, which means it has a simple value and is not associated as a parent key at this time
                     // so we need to convert it
-                    var currentKeyValue = _redisDatabase.StringGet(parentKey);
+                    var currentKeyValue = db.StringGet(parentKey);
                     Cache.InvalidateCacheItem(parentKey);
                     cacheValueItems.Add(currentKeyValue);
                     cacheValueItems.Add(item.Serialize());
@@ -75,7 +77,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
             }
             if (cacheValueItems.Count > 0)
             {
-                _redisDatabase.ListRightPush(parentKey, cacheValueItems.ToArray());
+                db.ListRightPush(parentKey, cacheValueItems.ToArray());
             }
         }
 
@@ -108,24 +110,26 @@ namespace Glav.CacheAdapter.Distributed.Redis
             if (depList.Count > 0)
             {
                 var redisList = depList.Select(r => (RedisValue)r.Serialize());
-                _redisDatabase.ListRightPush(parentKey, redisList.ToArray());
+                IDatabase db = _baseCache.RedisDatabase;
+                db.ListRightPush(parentKey, redisList.ToArray());
             }
         }
 
         public override IEnumerable<DependencyItem> GetDependentCacheKeysForParent(string parentKey, bool includeParentNode = false)
         {
+            IDatabase db = _baseCache.RedisDatabase;
             var itemList = new List<DependencyItem>();
-            if (!_redisDatabase.KeyExists(parentKey))
+            if (!db.KeyExists(parentKey))
             {
                 return itemList;
             }
 
-            var keyType = _redisDatabase.KeyType(parentKey);
+            var keyType = db.KeyType(parentKey);
             if (keyType != RedisType.List)
             {
                 return itemList;
             }
-            var keyList = _redisDatabase.ListRange(parentKey);
+            var keyList = db.ListRange(parentKey);
             if (keyList != null && keyList.Length > 0)
             {
                 for (var keyCount = 0; keyCount < keyList.Length; keyCount++)

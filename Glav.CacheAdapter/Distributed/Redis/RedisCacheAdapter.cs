@@ -16,7 +16,6 @@ namespace Glav.CacheAdapter.Distributed.Redis
     {
         private readonly ILogger<RedisCacheAdapter> _logger;
         private readonly PerRequestCacheHelper _requestCacheHelper = new PerRequestCacheHelper();
-        private static IDatabase _db;
         private static IConnectionMultiplexer _connection;
         //private readonly IDistributedCache _distributedCache;
         private readonly bool _cacheDependencyManagementEnabled;
@@ -27,7 +26,6 @@ namespace Glav.CacheAdapter.Distributed.Redis
             _logger = logger;
             string connectionString = configuration["RedisCacheOptions:ConnectionString"];
             _connection = ConnectionMultiplexer.Connect(connectionString);
-            _db = _connection.GetDatabase();
             _cacheDependencyManagementEnabled = cacheConfig.Value.IsCacheDependencyManagementEnabled;
         }
 
@@ -42,9 +40,10 @@ namespace Glav.CacheAdapter.Distributed.Redis
                 }
 
                 var data = new RedisValue();
-                if (_cacheDependencyManagementEnabled && _db.KeyType(cacheKey) == RedisType.List)
+                var rdb = RedisDatabase;
+                if (_cacheDependencyManagementEnabled && rdb.KeyType(cacheKey) == RedisType.List)
                 {
-                    var cacheValue = _db.ListGetByIndex(cacheKey, 0);
+                    var cacheValue = rdb.ListGetByIndex(cacheKey, 0);
                     if (cacheValue.HasValue && cacheValue != string.Empty)
                     {
                         data = cacheValue;
@@ -52,7 +51,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
                 }
                 else
                 {
-                    data = _db.StringGet(cacheKey);
+                    data = rdb.StringGet(cacheKey);
                 }
                 if (!data.IsNull && data.HasValue)
                 {
@@ -74,7 +73,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
             {
                 var binaryData = dataToAdd.Serialize();
                 var expiry = absoluteExpiry - DateTime.Now;
-                var success = _db.StringSet(cacheKey, binaryData, expiry);
+                var success = RedisDatabase.StringSet(cacheKey, binaryData, expiry);
                 if (!success)
                 {
                     _logger.LogError("Unable to store item in cache. CacheKey:{cacheKey}", cacheKey);
@@ -91,7 +90,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
             try
             {
                 var binaryData = dataToAdd.Serialize();
-                var success = _db.StringSet(cacheKey, binaryData, slidingExpiryWindow);
+                var success = RedisDatabase.StringSet(cacheKey, binaryData, slidingExpiryWindow);
                 if (!success)
                 {
                     _logger.LogError("Unable to store item in cache. CacheKey:{cacheKey}", cacheKey);
@@ -107,7 +106,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
         {
             try
             {
-                var success = _db.KeyDelete(cacheKey);
+                var success = RedisDatabase.KeyDelete(cacheKey);
                 if (!success)
                 {
                     _logger.LogError("Unable to remove item from cache. CacheKey:{cacheKey}", cacheKey);
@@ -135,8 +134,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
             try
             {
                 var redisKeyList = distinctKeys.Select(s => (RedisKey)s);
-
-                _db.KeyDelete(redisKeyList.ToArray(), CommandFlags.FireAndForget);
+                RedisDatabase.KeyDelete(redisKeyList.ToArray(), CommandFlags.FireAndForget);
             }
             catch (Exception ex)
             {
@@ -175,7 +173,7 @@ namespace Glav.CacheAdapter.Distributed.Redis
                         try
                         {
                             var allKeys = server.Keys();
-                            _db.KeyDelete(allKeys.ToArray(), CommandFlags.FireAndForget);
+                            RedisDatabase.KeyDelete(allKeys.ToArray(), CommandFlags.FireAndForget);
                         }
                         catch (Exception ex2)
                         {
@@ -186,6 +184,6 @@ namespace Glav.CacheAdapter.Distributed.Redis
             }
         }
 
-        public IDatabase RedisDatabase => _db;
+        public IDatabase RedisDatabase => _connection.GetDatabase();
     }
 }
